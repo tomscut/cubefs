@@ -48,6 +48,7 @@ const (
 	EnablePosixACL
 	EnableSummary
 	EnableUnixPermission
+	RequestTimeout
 
 	//adls
 	VolType
@@ -143,6 +144,7 @@ func InitMountOptions(opts []MountOption) {
 	opts[MetaSendTimeout] = MountOption{"metaSendTimeout", "Meta send timeout", "", int64(600)}
 	opts[BuffersTotalLimit] = MountOption{"buffersTotalLimit", "Send/Receive packets memory limit", "", int64(32768)} //default 4G
 	opts[MaxStreamerLimit] = MountOption{"maxStreamerLimit", "The maximum number of streamers", "", int64(0)}         // default 0
+	opts[RequestTimeout] = MountOption{"requestTimeout", "The Request Expiration Time", "", int64(0)}
 
 	for i := 0; i < MaxMountOption; i++ {
 		flag.StringVar(&opts[i].cmdlineValue, opts[i].keyword, "", opts[i].description)
@@ -288,4 +290,5 @@ type MountOptions struct {
 	MetaSendTimeout      int64
 	BuffersTotalLimit    int64
 	MaxStreamerLimit     int64
+	RequestTimeout       int64
 }

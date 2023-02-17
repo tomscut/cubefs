@@ -428,7 +428,7 @@ func main() {
 		}
 	}
 
-	if err = fs.Serve(fsConn, super); err != nil {
+	if err = fs.Serve(fsConn, super, opt); err != nil {
 		log.LogFlush()
 		syslog.Printf("fs Serve returns err(%v)", err)
 		os.Exit(1)
@@ -601,7 +601,8 @@ func mount(opt *proto.MountOptions) (fsConn *fuse.Conn, super *cfs.Super, err er
 		fuse.FSName("cubefs-" + opt.Volname),
 		fuse.Subtype("cubefs"),
 		fuse.LocalVolume(),
-		fuse.VolumeName("cubefs-" + opt.Volname)}
+		fuse.VolumeName("cubefs-" + opt.Volname),
+		fuse.RequestTimeout(opt.RequestTimeout)}
 
 	if opt.Rdonly {
 		options = append(options, fuse.ReadOnly())
@@ -700,6 +701,7 @@ func parseMountOption(cfg *config.Config) (*proto.MountOptions, error) {
 	opt.BuffersTotalLimit = GlobalMountOptions[proto.BuffersTotalLimit].GetInt64()
 	opt.MetaSendTimeout = GlobalMountOptions[proto.MetaSendTimeout].GetInt64()
 	opt.MaxStreamerLimit = GlobalMountOptions[proto.MaxStreamerLimit].GetInt64()
+	opt.RequestTimeout = GlobalMountOptions[proto.RequestTimeout].GetInt64()
 
 	if opt.MountPoint == "" || opt.Volname == "" || opt.Owner == "" || opt.Master == "" {
 		return nil, errors.New(fmt.Sprintf("invalid config file: lack of mandatory fields, mountPoint(%v), volName(%v), owner(%v), masterAddr(%v)", opt.MountPoint, opt.Volname, opt.Owner, opt.Master))

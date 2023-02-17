@@ -16,6 +16,7 @@ package fs
 
 import (
 	"io"
+	"math"
 	"os"
 	"strconv"
 	"sync"
@@ -124,8 +125,12 @@ func NewDir(s *Super, i *proto.InodeInfo, pino uint64, dirName string) fs.Node {
 }
 
 func (d *Dir) getCwd() string {
-	dirPath := ""
 	curIno := d.info.Inode
+	return d.getPath(curIno)
+}
+
+func (d *Dir) getPath(curIno uint64) string {
+	dirPath := ""
 	for curIno != d.super.rootIno {
 		d.super.fslock.Lock()
 		node, ok := d.super.nodeCache[curIno]
@@ -145,7 +150,7 @@ func (d *Dir) getCwd() string {
 	return dirPath
 }
 
-// Attr set the attributes of a directory.
+// Attr get the attributes of a directory.
 func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 	var err error
 	bgTime := stat.BeginStat()
@@ -154,7 +159,8 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 	}()
 
 	ino := d.info.Inode
-	info, err := d.super.InodeGet(ino)
+	audit := d.getAuditInfo("", math.MaxUint32, "attr")
+	info, err := d.super.InodeGet_audit(ino, audit)
 	if err != nil {
 		log.LogErrorf("Attr: ino(%v) err(%v)", ino, err)
 		return ParseError(err)
@@ -180,15 +186,15 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 		stat.EndStat("Create", err, bgTime, 1)
 		metric.SetWithLabels(err, map[string]string{exporter.Vol: d.super.volname})
 	}()
-
-	info, err := d.super.mw.Create_ll(d.info.Inode, req.Name, proto.Mode(req.Mode.Perm()), req.Uid, req.Gid, nil)
+	audit := d.getAuditInfo(req.Name, req.Uid, "create")
+	info, err := d.super.mw.Create_ll_audit(d.info.Inode, req.Name, proto.Mode(req.Mode.Perm()), req.Uid, req.Gid, nil, audit)
 	if err != nil {
 		log.LogErrorf("Create: parent(%v) req(%v) err(%v)", d.info.Inode, req, err)
 		return nil, nil, ParseError(err)
 	}
 
 	d.super.ic.Put(info)
-	child := NewFile(d.super, info, uint32(req.Flags&DefaultFlag), d.info.Inode)
+	child := NewFile(d.super, info, uint32(req.Flags&DefaultFlag), d.info.Inode, req.Name)
 
 	d.super.ec.OpenStream(info.Inode)
 	d.super.fslock.Lock()
@@ -234,8 +240,8 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 		stat.EndStat("Mkdir", err, bgTime, 1)
 		metric.SetWithLabels(err, map[string]string{exporter.Vol: d.super.volname})
 	}()
-
-	info, err := d.super.mw.Create_ll(d.info.Inode, req.Name, proto.Mode(os.ModeDir|req.Mode.Perm()), req.Uid, req.Gid, nil)
+	audit := d.getAuditInfo(req.Name, req.Uid, "mkdir")
+	info, err := d.super.mw.Create_ll_audit(d.info.Inode, req.Name, proto.Mode(os.ModeDir|req.Mode.Perm()), req.Uid, req.Gid, nil, audit)
 	if err != nil {
 		log.LogErrorf("Mkdir: parent(%v) req(%v) err(%v)", d.info.Inode, req, err)
 		return nil, ParseError(err)
@@ -303,10 +309,10 @@ func (d *Dir) Lookup(ctx context.Context, req *fuse.LookupRequest, resp *fuse.Lo
 	}()
 
 	log.LogDebugf("TRACE Lookup: parent(%v) req(%v)", d.info.Inode, req)
-
+	audit := d.getAuditInfo(req.Name, req.Uid, "lookup")
 	ino, ok := d.dcache.Get(req.Name)
 	if !ok {
-		ino, _, err = d.super.mw.Lookup_ll(d.info.Inode, req.Name)
+		ino, _, err = d.super.mw.Lookup_ll_audit(d.info.Inode, req.Name, audit)
 		if err != nil {
 			if err != syscall.ENOENT {
 				log.LogErrorf("Lookup: parent(%v) name(%v) err(%v)", d.info.Inode, req.Name, err)
@@ -315,11 +321,11 @@ func (d *Dir) Lookup(ctx context.Context, req *fuse.LookupRequest, resp *fuse.Lo
 		}
 	}
 
-	info, err := d.super.InodeGet(ino)
+	info, err := d.super.InodeGet_audit(ino, audit)
 	if err != nil {
 		log.LogErrorf("Lookup: parent(%v) name(%v) ino(%v) err(%v)", d.info.Inode, req.Name, ino, err)
 		dummyInodeInfo := &proto.InodeInfo{Inode: ino}
-		dummyChild := NewFile(d.super, dummyInodeInfo, DefaultFlag, d.info.Inode)
+		dummyChild := NewFile(d.super, dummyInodeInfo, DefaultFlag, d.info.Inode, req.Name)
 		return dummyChild, nil
 	}
 	mode := proto.OsMode(info.Mode)
@@ -329,7 +335,7 @@ func (d *Dir) Lookup(ctx context.Context, req *fuse.LookupRequest, resp *fuse.Lo
 		if mode.IsDir() {
 			child = NewDir(d.super, info, d.info.Inode, req.Name)
 		} else {
-			child = NewFile(d.super, info, DefaultFlag, d.info.Inode)
+			child = NewFile(d.super, info, DefaultFlag, d.info.Inode, req.Name)
 		}
 		d.super.nodeCache[ino] = child
 	}
@@ -355,7 +361,8 @@ func (d *Dir) ReadDir(ctx context.Context, req *fuse.ReadRequest, resp *fuse.Rea
 	}()
 
 	dirCtx := d.dctx.GetCopy(req.Handle)
-	children, err := d.super.mw.ReadDirLimit_ll(d.info.Inode, dirCtx.Name, limit)
+	audit := d.getAuditInfo("", req.Uid, "readdir")
+	children, err := d.super.mw.ReadDirLimit_ll_audit(d.info.Inode, dirCtx.Name, limit, audit)
 	if err != nil {
 		log.LogErrorf("readdirlimit: Readdir: ino(%v) err(%v)", d.info.Inode, err)
 		return make([]fuse.Dirent, 0), ParseError(err)
@@ -397,7 +404,7 @@ func (d *Dir) ReadDir(ctx context.Context, req *fuse.ReadRequest, resp *fuse.Rea
 		dcache.Put(child.Name, child.Inode)
 	}
 
-	infos := d.super.mw.BatchInodeGet(inodes)
+	infos := d.super.mw.BatchInodeGet_audit(inodes, audit)
 	for _, info := range infos {
 		d.super.ic.Put(info)
 	}
@@ -418,8 +425,8 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 		stat.EndStat("ReadDirAll", err, bgTime, 1)
 		metric.SetWithLabels(err, map[string]string{exporter.Vol: d.super.volname})
 	}()
-
-	children, err := d.super.mw.ReadDir_ll(d.info.Inode)
+	audit := d.getAuditInfo("", math.MaxUint32, "readdirall")
+	children, err := d.super.mw.ReadDir_ll_audit(d.info.Inode, audit)
 	if err != nil {
 		log.LogErrorf("Readdir: ino(%v) err(%v)", d.info.Inode, err)
 		return make([]fuse.Dirent, 0), ParseError(err)
@@ -473,8 +480,8 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 		stat.EndStat("Rename", err, bgTime, 1)
 		metric.SetWithLabels(err, map[string]string{exporter.Vol: d.super.volname})
 	}()
-
-	err = d.super.mw.Rename_ll(d.info.Inode, req.OldName, dstDir.info.Inode, req.NewName, true)
+	audit := d.getAuditInfoWithDst(req.OldName, dstDir.info.Inode, req.NewName, req.Uid, "rename")
+	err = d.super.mw.Rename_ll_audit(d.info.Inode, req.OldName, dstDir.info.Inode, req.NewName, true, audit)
 	if err != nil {
 		log.LogErrorf("Rename: parent(%v) req(%v) err(%v)", d.info.Inode, req, err)
 		return ParseError(err)
@@ -498,15 +505,16 @@ func (d *Dir) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.
 
 	ino := d.info.Inode
 	start := time.Now()
-	info, err := d.super.InodeGet(ino)
+	audit := d.getAuditInfo("", req.Header.Uid, "setattr")
+	info, err := d.super.InodeGet_audit(ino, audit)
 	if err != nil {
 		log.LogErrorf("Setattr: ino(%v) err(%v)", ino, err)
 		return ParseError(err)
 	}
 
 	if valid := setattr(info, req); valid != 0 {
-		err = d.super.mw.Setattr(ino, valid, info.Mode, info.Uid, info.Gid, info.AccessTime.Unix(),
-			info.ModifyTime.Unix())
+		err = d.super.mw.Setattr_audit(ino, valid, info.Mode, info.Uid, info.Gid, info.AccessTime.Unix(),
+			info.ModifyTime.Unix(), audit)
 		if err != nil {
 			d.super.ic.Delete(ino)
 			return ParseError(err)
@@ -534,15 +542,15 @@ func (d *Dir) Mknod(ctx context.Context, req *fuse.MknodRequest) (fs.Node, error
 		stat.EndStat("Mknod", err, bgTime, 1)
 		metric.SetWithLabels(err, map[string]string{exporter.Vol: d.super.volname})
 	}()
-
-	info, err := d.super.mw.Create_ll(d.info.Inode, req.Name, proto.Mode(req.Mode), req.Uid, req.Gid, nil)
+	audit := d.getAuditInfo(req.Name, req.Uid, "mknod")
+	info, err := d.super.mw.Create_ll_audit(d.info.Inode, req.Name, proto.Mode(req.Mode), req.Uid, req.Gid, nil, audit)
 	if err != nil {
 		log.LogErrorf("Mknod: parent(%v) req(%v) err(%v)", d.info.Inode, req, err)
 		return nil, ParseError(err)
 	}
 
 	d.super.ic.Put(info)
-	child := NewFile(d.super, info, DefaultFlag, d.info.Inode)
+	child := NewFile(d.super, info, DefaultFlag, d.info.Inode, req.Name)
 
 	d.super.fslock.Lock()
 	d.super.nodeCache[info.Inode] = child
@@ -565,15 +573,15 @@ func (d *Dir) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, e
 		stat.EndStat("Symlink", err, bgTime, 1)
 		metric.SetWithLabels(err, map[string]string{exporter.Vol: d.super.volname})
 	}()
-
-	info, err := d.super.mw.Create_ll(parentIno, req.NewName, proto.Mode(os.ModeSymlink|os.ModePerm), req.Uid, req.Gid, []byte(req.Target))
+	audit := d.getAuditInfo(req.NewName, req.Uid, "symlink")
+	info, err := d.super.mw.Create_ll_audit(parentIno, req.NewName, proto.Mode(os.ModeSymlink|os.ModePerm), req.Uid, req.Gid, []byte(req.Target), audit)
 	if err != nil {
 		log.LogErrorf("Symlink: parent(%v) NewName(%v) err(%v)", parentIno, req.NewName, err)
 		return nil, ParseError(err)
 	}
 
 	d.super.ic.Put(info)
-	child := NewFile(d.super, info, DefaultFlag, d.info.Inode)
+	child := NewFile(d.super, info, DefaultFlag, d.info.Inode, req.NewName)
 
 	d.super.fslock.Lock()
 	d.super.nodeCache[info.Inode] = child
@@ -608,8 +616,8 @@ func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.
 		stat.EndStat("Link", err, bgTime, 1)
 		metric.SetWithLabels(err, map[string]string{exporter.Vol: d.super.volname})
 	}()
-
-	info, err := d.super.mw.Link(d.info.Inode, req.NewName, oldInode.Inode)
+	audit := d.getAuditInfo(req.NewName, req.Uid, "link")
+	info, err := d.super.mw.Link_audit(d.info.Inode, req.NewName, oldInode.Inode, audit)
 	if err != nil {
 		log.LogErrorf("Link: parent(%v) name(%v) ino(%v) err(%v)", d.info.Inode, req.NewName, oldInode.Inode, err)
 		return nil, ParseError(err)
@@ -620,7 +628,7 @@ func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.
 	d.super.fslock.Lock()
 	newFile, ok := d.super.nodeCache[info.Inode]
 	if !ok {
-		newFile = NewFile(d.super, info, DefaultFlag, d.info.Inode)
+		newFile = NewFile(d.super, info, DefaultFlag, d.info.Inode, req.NewName)
 		d.super.nodeCache[info.Inode] = newFile
 	}
 	d.super.fslock.Unlock()
@@ -675,7 +683,8 @@ func (d *Dir) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, resp *fus
 		value = []byte(summaryStr)
 
 	} else {
-		info, err = d.super.mw.XAttrGet_ll(ino, name)
+		audit := d.getAuditInfo("", req.Uid, "getxattr")
+		info, err = d.super.mw.XAttrGet_ll_audit(ino, name, audit)
 		if err != nil {
 			log.LogErrorf("GetXattr: ino(%v) name(%v) err(%v)", ino, name, err)
 			return ParseError(err)
@@ -709,8 +718,8 @@ func (d *Dir) Listxattr(ctx context.Context, req *fuse.ListxattrRequest, resp *f
 	ino := d.info.Inode
 	_ = req.Size     // ignore currently
 	_ = req.Position // ignore currently
-
-	keys, err := d.super.mw.XAttrsList_ll(ino)
+	audit := d.getAuditInfo("", req.Uid, "listxattr")
+	keys, err := d.super.mw.XAttrsList_ll_audit(ino, audit)
 	if err != nil {
 		log.LogErrorf("ListXattr: ino(%v) err(%v)", ino, err)
 		return ParseError(err)
@@ -741,8 +750,9 @@ func (d *Dir) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error {
 		log.LogErrorf("Set 'DirStat' is not supported.")
 		return fuse.ENOSYS
 	}
+	audit := d.getAuditInfo("", req.Uid, "setxattr")
 	// TODO： implement flag to improve compatible (Mofei Zhang)
-	if err = d.super.mw.XAttrSet_ll(ino, []byte(name), []byte(value)); err != nil {
+	if err = d.super.mw.XAttrSet_ll_audit(ino, []byte(name), []byte(value), audit); err != nil {
 		log.LogErrorf("Setxattr: ino(%v) name(%v) err(%v)", ino, name, err)
 		return ParseError(err)
 	}

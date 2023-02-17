@@ -172,8 +172,10 @@ func (f *File) Forget() {
 	bgTime := stat.BeginStat()
 
 	ino := f.info.Inode
+	metric := exporter.NewTPCnt("fileforget")
 	defer func() {
 		stat.EndStat("Forget", err, bgTime, 1)
+		metric.SetWithLabels(err, map[string]string{exporter.Vol: f.super.volname})
 		log.LogDebugf("TRACE Forget: ino(%v)", ino)
 	}()
 
@@ -207,9 +209,10 @@ func (f *File) Forget() {
 func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (handle fs.Handle, err error) {
 	bgTime := stat.BeginStat()
 	var needBCache bool
-
+	metric := exporter.NewTPCnt("fileopen")
 	defer func() {
 		stat.EndStat("Open", err, bgTime, 1)
+		metric.SetWithLabels(err, map[string]string{exporter.Vol: f.super.volname})
 	}()
 
 	ino := f.info.Inode
@@ -282,13 +285,14 @@ func (f *File) Release(ctx context.Context, req *fuse.ReleaseRequest) (err error
 
 	ino := f.info.Inode
 	bgTime := stat.BeginStat()
-
+	metric := exporter.NewTPCnt("filerelease")
 	defer func() {
 		stat.EndStat("Release", err, bgTime, 1)
 		f.fWriter.FreeCache()
 		if DisableMetaCache {
 			f.super.ic.Delete(ino)
 		}
+		metric.SetWithLabels(err, map[string]string{exporter.Vol: f.super.volname})
 	}()
 
 	log.LogDebugf("TRACE Release enter: ino(%v) req(%v)", ino, req)
@@ -507,6 +511,10 @@ func (f *File) Fsync(ctx context.Context, req *fuse.FsyncRequest) (err error) {
 
 	log.LogDebugf("TRACE Fsync enter: ino(%v)", f.info.Inode)
 	start := time.Now()
+	metric := exporter.NewTPCnt("filesync")
+	defer func() {
+		metric.SetWithLabels(err, map[string]string{exporter.Vol: f.super.volname})
+	}()
 	if proto.IsHot(f.super.volType) {
 		err = f.super.ec.Flush(f.info.Inode)
 	} else {
@@ -579,8 +587,10 @@ func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse
 func (f *File) Readlink(ctx context.Context, req *fuse.ReadlinkRequest) (string, error) {
 	var err error
 	bgTime := stat.BeginStat()
+	metric := exporter.NewTPCnt("readlink")
 	defer func() {
 		stat.EndStat("Readlink", err, bgTime, 1)
+		metric.SetWithLabels(err, map[string]string{exporter.Vol: f.super.volname})
 	}()
 
 	ino := f.info.Inode
